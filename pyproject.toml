@@ -21,6 +21,8 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     "psycopg2-binary>=2.9",
+    # pgvector SQLAlchemy type — the `Vector` used by chunks.embedding
+    "pgvector>=0.5",
     # config
     "pydantic-settings>=2.5",
     # converter
@@ -44,6 +46,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires a real PostgreSQL container (see tests/integration/conftest.py)",
+]
 
 [tool.ruff]
 line-length = 120

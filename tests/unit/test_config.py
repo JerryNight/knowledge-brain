@@ -5,15 +5,18 @@ from pydantic import ValidationError
 
 from kb.config import Settings
 
+APP_DSN = "postgresql+asyncpg://kb_app:kb_app_pw@localhost:5432/kb"
+ADMIN_DSN = "postgresql+asyncpg://kb:kb@localhost:5432/kb"
+
 BASE_ENV = {
-    "DATABASE_URL": "postgresql+asyncpg://kb:kb@localhost:5432/kb",
+    "DATABASE_URL": APP_DSN,
     "DATABASE_URL_SYNC": "postgresql://kb:kb@localhost:5432/kb",
 }
 
 
 def test_settings_loads_required_fields():
     s = Settings(**BASE_ENV)
-    assert s.database_url.endswith("/kb")
+    assert s.database_url == APP_DSN
     assert s.database_url_sync.startswith("postgresql://")
 
 
@@ -65,3 +68,35 @@ def test_importing_package_does_not_require_env():
 
     importlib.reload(cfg)
     assert callable(cfg.get_settings)
+
+
+# --------------------------------------------------------------------------
+# Tenant isolation depends on the app connecting as a role RLS applies to.
+# These tests protect the guard that catches the opposite at startup.
+# --------------------------------------------------------------------------
+
+
+def test_admin_dsn_is_optional():
+    """Deployments that never need elevated access must still load."""
+    s = Settings(**BASE_ENV)
+    assert s.database_url_admin == ""
+
+
+def test_app_and_admin_roles_must_differ():
+    """Same role for both DSNs == RLS silently disabled. Must not load."""
+    with pytest.raises(ValidationError) as exc:
+        Settings(**BASE_ENV, DATABASE_URL_ADMIN=APP_DSN)
+
+    # The message has to say what to do, not just that something is wrong.
+    assert "kb_app" in str(exc.value)
+
+
+def test_role_comparison_ignores_password_and_host():
+    """Only the role name matters — different passwords are still the same role."""
+    with pytest.raises(ValidationError):
+        Settings(**BASE_ENV, DATABASE_URL_ADMIN="postgresql+asyncpg://kb_app:other@db:5432/kb")
+
+
+def test_distinct_roles_are_accepted():
+    s = Settings(**BASE_ENV, DATABASE_URL_ADMIN=ADMIN_DSN)
+    assert s.database_url_admin == ADMIN_DSN

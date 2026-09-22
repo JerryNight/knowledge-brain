@@ -31,17 +31,20 @@ class Document(Base):
     __table_args__ = (UniqueConstraint("user_id", "source", "source_path", name="uq_documents_user_source_path"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # 不单建索引：唯一约束 (user_id, source, source_path) 的 btree 以 user_id 打头，
+    # 租户过滤已经走得上（spec §5 索引清单只要求这一条）。
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     # 'git' | 'upload'
     source: Mapped[str] = mapped_column(String, nullable=False)
     # 仓库内相对路径 / 上传文件名
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
-    # sha256(原始字节)
-    content_sha: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # sha256(原始字节)。不做索引：三级短路是"按 (user_id, source, source_path)
+    # 取出该行再比对哈希"，不存在按 content_sha 反查的查询。
+    content_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     # sha256(转换后 markdown)，同时也是缓存键
-    converted_sha: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    converted_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mime: Mapped[str | None] = mapped_column(String, nullable=True)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # frontmatter title 或首行

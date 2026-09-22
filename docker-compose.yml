@@ -1,0 +1,40 @@
+# Local development stack.
+#
+# Only `postgres` is defined today. The `api` and `worker` services (M2.3 in the
+# implementation plan) need entrypoints that do not exist yet — `src/kb/main.py`
+# and `src/kb/worker.py` arrive with the MCP/REST milestone. Adding services that
+# cannot start would make `docker compose up` fail for no good reason, so they
+# are left out until then.
+
+name: knowledge-brain
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.postgres
+      args:
+        PG_MAJOR: ${PG_MAJOR:-17}
+    image: kb-postgres:local
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kb}
+      POSTGRES_DB: ${POSTGRES_DB:-kb}
+      # Password handed to the unprivileged `kb_app` role on first init.
+      # Local development only — override it anywhere real.
+      KB_APP_PASSWORD: ${KB_APP_PASSWORD:-kb_app_pw}
+    ports:
+      # Exposed so Alembic and pytest can reach it from the host/WSL side.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `alembic upgrade head` must wait for this, not just for the container.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kb} -d ${POSTGRES_DB:-kb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  pgdata:

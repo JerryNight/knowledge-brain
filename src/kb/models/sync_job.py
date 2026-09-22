@@ -33,7 +33,8 @@ class SyncJob(Base):
     __tablename__ = "sync_jobs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    # 不单建索引：队列的取件路径是 (status, run_after)（spec §5 索引清单）
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     # upload 任务为 null
     repo_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("repos.id", ondelete="CASCADE"), nullable=True

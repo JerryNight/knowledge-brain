@@ -1,0 +1,72 @@
+# PostgreSQL for knowledge-brain: pgvector + zhparser.
+#
+# Why this image has to exist (spec §5, "必须提前知道的坑"):
+# zhparser is a C extension. It cannot be installed at runtime from a package —
+# it must be compiled against the server headers, and its segmenter (SCWS) is
+# not packaged for Debian at all. Without it Postgres treats an entire Chinese
+# sentence as a single token, so the `tsvector` half of hybrid retrieval is
+# dead weight. Worse, it fails *silently*: retrieval still returns something,
+# just steadily worse.
+#
+# Sources are vendored under docker/vendor/ instead of being fetched during the
+# build. github.com is not reachable from the build container in this
+# environment, and pinned + checksummed tarballs make the build reproducible and
+# buildable offline. Provenance: docker/vendor/README.md.
+
+ARG PG_MAJOR=17
+
+FROM pgvector/pgvector:pg17
+
+ARG PG_MAJOR
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build toolchain. Installed only for the compilation steps below and removed
+# again afterwards.
+RUN set -eux \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bzip2 \
+      build-essential \
+      ca-certificates \
+      pkg-config \
+      "postgresql-server-dev-${PG_MAJOR}" \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/kb-build
+
+COPY docker/vendor/scws.tar.bz2 docker/vendor/zhparser.tar.gz ./
+
+# SCWS — the Chinese segmenter zhparser links against. Built into /usr/local.
+RUN set -eux \
+ && mkdir -p scws \
+ && tar -xjf scws.tar.bz2 -C scws --strip-components=1 \
+ && cd scws \
+ && ./configure --prefix=/usr/local \
+ && make -j"$(nproc)" \
+ && make install \
+ && ldconfig \
+ && cd /tmp/kb-build \
+ && rm -rf scws scws.tar.bz2
+
+# zhparser — PGXS build. `make install` places the shared library, the
+# extension SQL, the LLVM bitcode and the dictionary into the paths the server
+# expects, so no manual copying is needed.
+RUN set -eux \
+ && mkdir -p zhparser \
+ && tar -xzf zhparser.tar.gz -C zhparser --strip-components=1 \
+ && cd zhparser \
+ && make SCWS_HOME=/usr/local \
+ && make SCWS_HOME=/usr/local install \
+ && cd /tmp/kb-build \
+ && rm -rf zhparser zhparser.tar.gz
+
+# Drop the compiler toolchain; it is most of the size we added.
+RUN set -eux \
+ && apt-get purge -y --auto-remove build-essential pkg-config \
+ && rm -rf /var/lib/apt/lists/* /tmp/kb-build
+
+# Extensions, the `chinese` text search configuration, and the application role
+# are provisioned on first init. Schema (tables/indexes/RLS) is owned by Alembic.
+COPY docker/initdb/ /docker-entrypoint-initdb.d/
+RUN chmod +x /docker-entrypoint-initdb.d/*.sh

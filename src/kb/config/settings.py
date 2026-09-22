@@ -4,9 +4,22 @@ Aligns with spec §10: config via environment variables + pydantic-settings.
 """
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _dsn_username(dsn: str) -> str:
+    """Extract the role name from a SQLAlchemy/PostgreSQL DSN.
+
+    Returns "" when the DSN carries no userinfo, so callers can treat "unknown"
+    and "absent" the same way.
+    """
+    try:
+        return urlsplit(dsn).username or ""
+    except ValueError:
+        return ""
 
 
 class Settings(BaseSettings):
@@ -17,7 +30,16 @@ class Settings(BaseSettings):
     )
 
     # ---------- database ----------
+    # Application runtime DSN. Must use the unprivileged role created by the
+    # database image's init script (`kb_app`): RLS is bypassed for superusers,
+    # and for table owners unless the table is marked FORCE. Pointing this at
+    # the owner would silently disable tenant isolation (spec §5 ②).
     database_url: str = Field(alias="DATABASE_URL")
+    # Owner/superuser DSN. Admin paths only: rebuild, fixtures, CLI. Optional —
+    # only the code that genuinely needs elevated access should require it.
+    database_url_admin: str = Field(default="", alias="DATABASE_URL_ADMIN")
+    # Alembic uses the synchronous driver and needs DDL rights, so this is the
+    # owner role as well.
     database_url_sync: str = Field(alias="DATABASE_URL_SYNC")
 
     # ---------- api / mcp ----------
@@ -90,6 +112,32 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_MAX_LIMIT must be >= RETRIEVAL_DEFAULT_LIMIT")
         if self.embed_skip_min_tokens >= self.embed_skip_max_tokens:
             raise ValueError("EMBED_SKIP_MIN_TOKENS must be < EMBED_SKIP_MAX_TOKENS")
+        return self
+
+    @model_validator(mode="after")
+    def _check_app_role_is_unprivileged(self) -> "Settings":
+        """Refuse a configuration that would silently defeat tenant isolation.
+
+        Every retrieval path assumes RLS applies to the application's role. It
+        does not when the role is a superuser, nor for a table's owner unless
+        that table is marked FORCE. If the app and the admin DSN resolve to the
+        same role, one of those two is happening — and the failure mode is a
+        cross-tenant leak, which is exactly the red line in spec §11.1.
+
+        Only checked when DATABASE_URL_ADMIN is set, so deployments that do not
+        need an admin DSN are unaffected.
+        """
+        if not self.database_url_admin:
+            return self
+        app_role = _dsn_username(self.database_url)
+        admin_role = _dsn_username(self.database_url_admin)
+        if app_role and app_role == admin_role:
+            raise ValueError(
+                "DATABASE_URL and DATABASE_URL_ADMIN must use different roles, "
+                f"but both use {app_role!r}. The application has to connect as a "
+                "non-owner, non-superuser role (e.g. kb_app) or RLS will not "
+                "apply and tenants can read each other's data."
+            )
         return self
 
 
