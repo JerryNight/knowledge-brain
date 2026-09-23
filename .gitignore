@@ -20,6 +20,7 @@ dist/
 
 # Local data
 /data/
+/var/
 *.log
 
 # IDE
