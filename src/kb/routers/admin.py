@@ -17,12 +17,10 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from pydantic import BaseModel
 
+from kb.converter.base import UNSEARCHABLE_STATUSES
 from kb.deps import ServicesDep, UserIdDep
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-# Conversion states that mean "known about, but not searchable" (spec §7).
-UNSEARCHABLE_STATUSES = ("failed", "no_text")
 
 
 class RebuildResponse(BaseModel):

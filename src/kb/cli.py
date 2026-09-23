@@ -23,6 +23,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from kb.converter.base import UNSEARCHABLE_STATUSES
 from kb.wiring import build_services
 
 # Set once, before any adapter is constructed, so the first query is not the
@@ -141,7 +142,13 @@ async def _status(args: argparse.Namespace) -> int:
     repos = await services.repos.list_repos(user_id)
     jobs = await services.queue.counts_for_user(user_id)
     chunks = await services.index_maintenance.count_chunks(user_id)
-    unsearchable = await services.documents.by_status(user_id, ("failed", "no_text"))
+    # `by_status` is keyword-only (``*`` in its signature), so the positional form
+    # of this call is a TypeError. It shipped that way once -- the command crashed
+    # on first use and nothing caught it, because the CLI had no test. See
+    # tests/unit/test_cli_contract_guard.py.
+    unsearchable = await services.documents.by_status(
+        user_id=user_id, statuses=UNSEARCHABLE_STATUSES
+    )
 
     print(f"vector_search_enabled: {services.vector_search_enabled}")
     print(f"chunks: {chunks}")

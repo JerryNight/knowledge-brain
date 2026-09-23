@@ -24,6 +24,14 @@ CONVERSION_FAILED = "failed"
 CONVERSION_NO_TEXT = "no_text"
 CONVERSION_UNSUPPORTED = "unsupported"
 
+# The two states that leave a document *in* the knowledge base but out of the
+# index (spec §7). Defined once because the CLI report and the status endpoint
+# have to describe the same set: two literals would drift apart silently, and
+# this list is the only thing that tells "converted badly" apart from "never
+# uploaded". `unsupported` is deliberately absent -- it is a dropped format, not
+# a failed conversion.
+UNSEARCHABLE_STATUSES = (CONVERSION_FAILED, CONVERSION_NO_TEXT)
+
 
 @dataclass(slots=True)
 class ConversionResult:
