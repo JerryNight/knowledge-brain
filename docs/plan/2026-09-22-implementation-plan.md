@@ -19,32 +19,58 @@
 
 ## 0.1 进度快照（2026-09-23 更新）
 
+Docker 已换成 WSL 原生引擎（`docker.io` 29.1.3 + `docker-compose-v2` 2.40.3），
+集成测试可以真正跑起来了。
+
 | 里程碑 | 代码 | 单元测试 | 集成测试 |
 |---|---|---|---|
 | M0 工程地基 | ✅ 已提交（`037ca61`） | ✅ | — |
-| M1 数据模型 + 租户隔离 🔴 | ✅ 已提交（`5dc5550`） | ✅ 含结构性守卫 | ⏸️ 待 Docker |
-| M2 容器与本地 PG | ✅ 镜像/initdb/compose 已就绪 | — | ⏸️ 待 Docker 构建 |
-| M3 队列 | ✅ | ✅ | ⏸️ 待 Docker |
+| M1 数据模型 + 租户隔离 🔴 | ✅ 已合并（PR #1） | ✅ 含结构性守卫 | ✅ **12 passed**（首次真正执行） |
+| M2 容器与本地 PG | ✅ 冷构建 4 分 39 秒 | — | ✅ 扩展/分词/RLS/索引全部实测 |
+| M3 队列 | ✅ | ✅ | ⏸️ 待补 |
 | M4 转换层 | ✅ | ✅ | — |
 | M5 分块与 embedding | ✅ | ✅ | — |
-| M6 同步管道 🔴 | ✅ | ✅（含红线） | ⏸️ 待 Docker |
-| M7 混合检索 | ✅ | ✅（含 RRF 红线） | ⏸️ 待 Docker（EXPLAIN 验证） |
+| M6 同步管道 🔴 | ✅ | ✅（含红线） | ⏸️ 待补 |
+| M7 混合检索 | ✅ 向量路索引已修 | ✅ 含 RRF 红线 + SQL 形状守卫 | ✅ **M7.1 验收通过**（向量路走 HNSW） |
 | M8 MCP + REST | ✅ | ✅ | 待真机连 Claude Code |
-| M9 评估集 | ✅ 框架 + 模板集 | ✅ | ⏸️ 待真实笔记与 Docker |
+| M9 评估集 | ✅ 框架 + 模板集 | ✅ | ⏸️ 待真实笔记 |
 
-**当前测试状态**：`ruff check` 零报错；`pytest tests/unit` **358 passed**（102 个 py 文件 / 13.3k 行）。
+**当前测试状态**：`ruff check` 零报错；`pytest tests/unit` **369 passed**；
+`pytest tests/integration` **20 passed**（含 12 个跨租户红线用例 + 8 个检索读路径用例）。
 
-**搁置项**（用户明确要求"先写代码，最后统一测试"）：
-- PG 镜像构建（`docker compose build postgres`）
-- M1.9 跨租户泄漏 12 用例（`tests/integration/test_tenant_isolation.py`）
-- M7.1 的 `EXPLAIN` 确认向量路走 HNSW
+**M7.1 的结论与修复**（完整记录见 `docs/m7-index-usage-findings.md`）：
+
+1. **向量路走 Seq Scan（5935 ms），已修**：`LIMIT` 无法下推到 join 之下，而 HNSW 的启动
+   代价极高，只有 `Limit` 直接挂在索引扫描上才划算。改为「CTE 内先 `LIMIT`，再 join 取
+   元数据」，并把 `tags` / `path_prefix` 改成先解析成文档 id 允许列表（避免了
+   `IN (子查询)` 被去关联成 Hash Join）。实测 **5935 ms → 0.8 ms**，真实绑定参数下确认走
+   `ix_chunks_embedding_hnsw`。回归守卫：`tests/unit/test_retrieval_sql.py`。
+2. **关键词路用不上 GIN，属于结构性限制**：RLS 把策略谓词当作安全屏障，非 `leakproof`
+   的 `tsv @@ tsquery` 不能下推。已实测排除"改写成 leakproof 形式"这条路（`pg_catalog`
+   里 `@@` 的全部重载都是 `leakproof=false`）。三个方向（接受 / `SECURITY DEFINER` /
+   分区）的取舍见 findings 文档 §三 —— 当前建议**接受**，因为本项目租户数≈1，
+   分区带不来收益，而另两个方向要削弱 spec §11.1 红线。
+
+**搁置项**：
 - M9 用真实笔记构造 50~100 条查询并跑基线
+- MCP 真机验收（Claude Code 实连 `/mcp`）
+- M3 / M6 的集成用例
 
-**期间发现并修掉的两个既有缺陷**（原本靠 `from __future__ import annotations` 侥幸没炸）：
+**期间发现并修掉的 6 个既有缺陷**：
 1. `kb/indexer/service.py` 用了 `ExistingChunk` 但没 import（ruff F821）；
 2. `kb/retrieval/types.py` 的 `SearchResult.message` 里 `not self.branches` 恒为假
    —— `branches` 是每个分支的计数 dict，永远非空。后果是"两条检索路全挂"时
-   会回"没有匹配的笔记"，让模型误判成知识库为空。spec §9 明确禁止这种误导。
+   会回"没有匹配的笔记"，让模型误判成知识库为空。spec §9 明确禁止这种误导；
+3. `tests/integration/conftest.py` 从 `testcontainers.core.exceptions` 导入
+   `DockerException` —— 该类在 testcontainers 4.x 已被移除，import 失败又被
+   `except ImportError` 吞掉、误报成"testcontainers is not installed"，
+   导致 **M1.9 那 12 个跨租户红线用例从未执行过**；
+4. `test_query_builder_renders_a_tenant_predicate` 用 `str(uuid)` 断言编译后的 SQL，
+   而 PG 渲染 UUID 字面量不带连字符 —— 断言永远失败；
+5. 单元测试不隔离 `.env`（`Settings` 声明了 `env_file=".env"`），照 README 建 `.env`
+   之后 2 个配置测试立即变红；
+6. `docker-compose.yml` 的 `api`/`worker` 共享同一 `build` 与 tag，冷构建时 BuildKit
+   并发导出同名镜像，报 `failed to solve: image "kb-app:local": already exists`。
 
 ---
 
@@ -288,8 +314,8 @@ knowledge-brain/
 
 | # | 任务 | 验收 |
 |---|---|---|
-| M7.1 | 向量路：`embed(query)` → pgvector HNSW top 40 | 走索引（EXPLAIN 验证） |
-| M7.2 | 关键词路：`websearch_to_tsquery` → tsvector GIN top 40 | 依赖 zhparser |
+| M7.1 | 向量路：`embed(query)` → pgvector HNSW top 40 | ✅ 走索引（`scripts/explain_retrieval.py`） |
+| M7.2 | 关键词路：`websearch_to_tsquery` → tsvector GIN top 40 | ⚠️ 依赖 zhparser；GIN 在 RLS 下不可用（见下） |
 | M7.3 | **RRF 融合**：`score = Σ 1/(60 + rank)` | 纯函数，直接测排名 |
 | M7.4 | 每文档限量：同文件最多 3 chunk（防霸榜） | 单测覆盖 |
 | M7.5 | 宽召回：默认 25，上限 50 | 参数校验 |
@@ -300,6 +326,14 @@ knowledge-brain/
 | M7.10 | query embedding 缓存接入 | 复用 M5.11 |
 
 **验收标准**：spec §11.1 #6（RRF 纯函数测试）通过；EXPLAIN 确认向量路走 HNSW 索引。
+
+**M7.1 状态**：✅ 通过（2026-09-23）。50000 chunks 实测 5935 ms → 0.8 ms，
+`Limit` 直接挂在 `Index Scan using ix_chunks_embedding_hnsw` 上。
+
+**M7.2 的已知限制（结构性）**：RLS 把策略谓词当作安全屏障，非 `leakproof` 的
+`tsv @@ tsquery` 无法下推到索引 —— 应用角色下 GIN 索引用不上，关键词路扫本租户语料
+（50k chunks 实测 8 ms，代价与单个租户的语料量成正比）。三个方向的取舍见
+`docs/m7-index-usage-findings.md` §三，当前建议**接受现状**。
 
 ---
 

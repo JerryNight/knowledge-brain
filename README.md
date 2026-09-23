@@ -231,6 +231,24 @@ uv run pytest tests/integration
 > `docker compose build postgres`；Docker 不可用时它们会 **skip 并给出提示**，
 > 而不是静默通过——跳过和通过必须能区分开。
 
+集成测试里 `test_search_backend.py` 补的是**读路径**：检索分支跑在应用角色上（RLS
+生效），每个租户都预置了一份"与另一租户同路径、同文本、同向量"的笔记 —— 任一层
+隔离失效都会露出来，而不是表现为一个空结果。
+
+### 索引真的被用上了吗
+
+```bash
+uv run python scripts/explain_retrieval.py     # 需要已迁移的库 + 一份语料
+```
+
+它跑真实的检索分支、在驱动层截获**实际发出的语句与绑定参数**、以应用角色
+`EXPLAIN ANALYZE`，并断言向量路命中 HNSW 索引（未命中退出码为 1）。手写 SQL 去
+EXPLAIN 是不等价的：`LIMIT` 的位置、过滤条件的形状都会改变计划。
+
+关键词路的 `ix_chunks_tsv_gin` 在 RLS 下**结构性不可用**（RLS 谓词是安全屏障，
+非 `leakproof` 的 `tsv @@ tsquery` 不能下推），原因、实测数据与三个候选方向见
+`docs/m7-index-usage-findings.md`。
+
 单元测试覆盖的核心行为，都是"排错了很难发现"的那一类：
 
 | 文件 | 覆盖 |
@@ -239,6 +257,7 @@ uv run pytest tests/integration
 | `test_indexer_service.py` | 三级短路里的第三级（同 ordinal 同文本 → 不重算向量）、embedding 窗口、转换失败隔离 |
 | `test_sync_pipeline.py` | 🔴 `last_synced_sha` 只在整批成功后推进；改名零 embedding；`.kbignore` 双向全量对比 |
 | `test_retrieval.py` | 🔴 RRF 纯函数排名；一路失败不算整次查询失败；每文档限量；空结果的文案 |
+| `test_retrieval_sql.py` | 检索 SQL 的**形状**：`LIMIT` 必须落在 join 之前、打分阶段不得 join `documents`（HNSW 的回归守卫，见下） |
 | `test_worker.py` | 三种 job 的分发与 ack/fail；重建按批入队 |
 | `test_api.py` | 认证中间件、401、principal 不串请求、REST 语义（404 而非 403） |
 | `test_mcp_tools.py` | spec §9 的结果格式：空结果给文案、转换产物显式标注 |
