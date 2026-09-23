@@ -1,7 +1,7 @@
 # Obsidian RAG 知识库平台 — 实施计划
 
 日期：2026-09-22
-状态：待评审
+状态：M0–M1 已合并；**M3–M9 代码已完成并通过单元测试**，集成测试待 Docker 环境恢复后补跑
 依据：`docs/superpowers/specs/2026-09-22-obsidian-rag-knowledge-base-design.md`
 参考项目：`/home/yongtao/project/kb`（同领域已上线项目，本计划的技术栈与工程约定对齐它）
 
@@ -14,6 +14,37 @@
 - 每个里程碑末尾有**验收标准**，不通过不进下一个里程碑。
 - 标 🔴 的是红线任务（spec §11.1 明确列为红线），必须优先完成且必须有测试覆盖。
 - 标 ⚠️ 的是已识别的环境/技术风险，已在 §9 单独列出。
+
+---
+
+## 0.1 进度快照（2026-09-23 更新）
+
+| 里程碑 | 代码 | 单元测试 | 集成测试 |
+|---|---|---|---|
+| M0 工程地基 | ✅ 已提交（`037ca61`） | ✅ | — |
+| M1 数据模型 + 租户隔离 🔴 | ✅ 已提交（`5dc5550`） | ✅ 含结构性守卫 | ⏸️ 待 Docker |
+| M2 容器与本地 PG | ✅ 镜像/initdb/compose 已就绪 | — | ⏸️ 待 Docker 构建 |
+| M3 队列 | ✅ | ✅ | ⏸️ 待 Docker |
+| M4 转换层 | ✅ | ✅ | — |
+| M5 分块与 embedding | ✅ | ✅ | — |
+| M6 同步管道 🔴 | ✅ | ✅（含红线） | ⏸️ 待 Docker |
+| M7 混合检索 | ✅ | ✅（含 RRF 红线） | ⏸️ 待 Docker（EXPLAIN 验证） |
+| M8 MCP + REST | ✅ | ✅ | 待真机连 Claude Code |
+| M9 评估集 | ✅ 框架 + 模板集 | ✅ | ⏸️ 待真实笔记与 Docker |
+
+**当前测试状态**：`ruff check` 零报错；`pytest tests/unit` **358 passed**（102 个 py 文件 / 13.3k 行）。
+
+**搁置项**（用户明确要求"先写代码，最后统一测试"）：
+- PG 镜像构建（`docker compose build postgres`）
+- M1.9 跨租户泄漏 12 用例（`tests/integration/test_tenant_isolation.py`）
+- M7.1 的 `EXPLAIN` 确认向量路走 HNSW
+- M9 用真实笔记构造 50~100 条查询并跑基线
+
+**期间发现并修掉的两个既有缺陷**（原本靠 `from __future__ import annotations` 侥幸没炸）：
+1. `kb/indexer/service.py` 用了 `ExistingChunk` 但没 import（ruff F821）；
+2. `kb/retrieval/types.py` 的 `SearchResult.message` 里 `not self.branches` 恒为假
+   —— `branches` 是每个分支的计数 dict，永远非空。后果是"两条检索路全挂"时
+   会回"没有匹配的笔记"，让模型误判成知识库为空。spec §9 明确禁止这种误导。
 
 ---
 
