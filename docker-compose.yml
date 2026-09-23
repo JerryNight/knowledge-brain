@@ -1,12 +1,40 @@
-# Local development stack.
+# 本地与单机部署栈（spec §10）。
 #
-# Only `postgres` is defined today. The `api` and `worker` services (M2.3 in the
-# implementation plan) need entrypoints that do not exist yet — `src/kb/main.py`
-# and `src/kb/worker.py` arrive with the MCP/REST milestone. Adding services that
-# cannot start would make `docker compose up` fail for no good reason, so they
-# are left out until then.
+# 三个服务：自建 PG（pgvector + zhparser）、api、worker。api 与 worker 用同一
+# 镜像、同一份配置，只有 command 不同 —— 这是 spec §4「一份代码两个入口」的字面实现。
+#
+# 用法：
+#   docker compose build
+#   docker compose up -d
+#   docker compose exec api alembic upgrade head
+#
+# 首次启动前需要 .env（cp .env.example .env 并填 EMBEDDING_API_KEY）。
+#
+# ⚠️ 生产必须在自己前面放一个 HTTPS 终结器（反向代理 / 负载均衡）。
+#    bearer token 走明文 HTTP 等于把知识库公开 —— spec §9。
 
 name: knowledge-brain
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.app
+  image: kb-app:local
+  env_file:
+    - .env
+  environment:
+    # 容器内互相访问用的是服务名，不是 localhost —— .env 里写的是宿主机视角。
+    DATABASE_URL: postgresql+asyncpg://kb_app:${KB_APP_PASSWORD:-kb_app_pw}@postgres:5432/${POSTGRES_DB:-kb}
+    DATABASE_URL_ADMIN: postgresql+asyncpg://${POSTGRES_USER:-kb}:${POSTGRES_PASSWORD:-kb}@postgres:5432/${POSTGRES_DB:-kb}
+    DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-kb}:${POSTGRES_PASSWORD:-kb}@postgres:5432/${POSTGRES_DB:-kb}
+  volumes:
+    - kbdata:/data
+  depends_on:
+    postgres:
+      # 等到真正能接受连接，而不是仅仅容器起来了 —— 否则第一次查询会拍在
+      # "the database system is starting up" 上。
+      condition: service_healthy
+  restart: unless-stopped
 
 services:
   postgres:
@@ -36,5 +64,33 @@ services:
       retries: 30
     restart: unless-stopped
 
+  api:
+    <<: *app
+    command: ["kb", "serve"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      # /api/health is deliberately unauthenticated and does not touch the
+      # database, so this reports "is the process serving" and nothing else.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: ["kb", "worker"]
+    # No port: the worker speaks to Postgres and to git remotes, nothing else.
+    healthcheck:
+      test: ["CMD-SHELL", "kb --help >/dev/null"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
 volumes:
   pgdata:
+  # Uploaded originals and the bare partial clones. Losing this costs a re-clone
+  # and a re-upload, not correctness (spec §5: the index is a derivative) — but
+  # it is still the only copy of uploaded files, so it is worth persisting.
+  kbdata:
