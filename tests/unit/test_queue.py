@@ -1,18 +1,30 @@
 """Unit tests for the queue's arithmetic and SQL shape.
 
-Concurrency (two workers, one row) and orphan recovery need a real Postgres and
-live in the integration suite. What can be pinned down here is the retry
-schedule, the decision to give up, and the presence of the lock hints that make
-the Postgres implementation safe in the first place.
+Concurrency (two workers, one row), orphan recovery and the validity of the
+claim statement itself need a real Postgres and live in
+``tests/integration/test_queue.py``. What can be pinned down here is the retry
+schedule, the decision to give up, and the *shape* of the statement the
+production code builds — which is why these tests call ``dequeue_statement``
+rather than formatting the template themselves. The earlier version of
+``test_kind_filter_...`` formatted the template inside the test and then
+asserted that its own argument appeared in the result: it could not disagree
+with the code, and it did not.
 """
 
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects import postgresql
 
 from kb.queue import base as queue_base
 from kb.queue.base import BACKOFF_CAP_SECONDS, Job, JobQueue, JobSpec, backoff_delay, should_retry
-from kb.queue.postgres import _DEQUEUE_TEMPLATE, PostgresJobQueue
+from kb.queue.postgres import _DEQUEUE_TEMPLATE, PostgresJobQueue, dequeue_statement
+
+
+def _render(kinds: list[str] | None) -> str:
+    """The SQL the production helper builds, compiled for Postgres."""
+    return str(dequeue_statement(kinds).compile(dialect=postgresql.dialect()))
 
 
 def test_backoff_starts_at_base_and_doubles() -> None:
@@ -60,9 +72,35 @@ def test_dequeue_sql_ignores_jobs_scheduled_for_the_future() -> None:
     assert "run_after IS NULL OR run_after <= now()" in _DEQUEUE_TEMPLATE
 
 
-def test_kind_filter_is_only_added_when_requested() -> None:
-    assert "ANY(:kinds)" not in _DEQUEUE_TEMPLATE.format(kind_filter="")
-    assert "kind = ANY(:kinds)" in _DEQUEUE_TEMPLATE.format(kind_filter="AND kind = ANY(:kinds)")
+def test_kind_filter_is_absent_when_no_kinds_are_requested() -> None:
+    assert ":kinds" not in _render(None)
+
+
+def test_kind_filter_is_built_as_an_expanding_in_list() -> None:
+    """`= ANY(:kinds)` and `expanding=True` cannot be combined.
+
+    ``expanding`` splices the sequence into one placeholder per element, so the
+    statement reaches Postgres as ``kind = ANY(($4, $5, $6))`` — several scalars
+    where an array is required. Postgres rejects it with ``WrongObjectTypeError``
+    every time, for every input; it is a statement defect, not a data problem.
+    ``IN`` is the form that matches an expanding bindparam.
+    """
+    sql = _render(["repo_sync", "doc_index"])
+    assert "kind IN (" in sql
+    assert "ANY" not in sql
+
+
+def test_the_guard_can_see_the_rejected_shape() -> None:
+    """Self-check: prove the assertion above is capable of failing.
+
+    Without this, the test would still pass if the production helper built
+    something the guard cannot describe. Compiling the rejected shape by hand
+    shows the two are distinguishable.
+    """
+    rejected = text(_DEQUEUE_TEMPLATE.format(kind_filter="AND kind = ANY(:kinds)")).bindparams(
+        bindparam("kinds", expanding=True)
+    )
+    assert "ANY" in str(rejected.compile(dialect=postgresql.dialect()))
 
 
 def test_postgres_queue_satisfies_the_interface() -> None:

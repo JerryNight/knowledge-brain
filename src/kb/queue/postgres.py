@@ -25,6 +25,7 @@ from collections.abc import Mapping, Sequence
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import TextClause
 
 from kb.models.sync_job import (
     STATUS_DONE,
@@ -59,6 +60,28 @@ UPDATE sync_jobs AS j
  WHERE j.id = c.id
 RETURNING j.id, j.user_id, j.repo_id, j.kind, j.payload, j.attempts
 """
+
+
+def dequeue_statement(kinds: Sequence[str] | None) -> TextClause:
+    """Build the claim statement for a set of job kinds.
+
+    Separate from :meth:`PostgresJobQueue.dequeue` so a unit test can compile the
+    statement the production code actually builds. The previous shape of this
+    code was checked by a test that formatted the template itself, which meant
+    the test could never disagree with the code.
+    """
+    if not kinds:
+        return text(_DEQUEUE_TEMPLATE.format(kind_filter=""))
+    # `IN :kinds` + expanding, not `= ANY(:kinds)` + expanding. The two cannot be
+    # combined: expanding splices the list into one placeholder per element, so
+    # `ANY` is handed several scalars instead of an array and Postgres rejects the
+    # statement outright (asyncpg WrongObjectTypeError). `= ANY` would instead
+    # need the list passed as a single array parameter — valid, but that is not
+    # what the expanding bindparam here does.
+    return text(_DEQUEUE_TEMPLATE.format(kind_filter="AND kind IN :kinds")).bindparams(
+        bindparam("kinds", expanding=True)
+    )
+
 
 ACK_SQL = text(
     """
@@ -170,12 +193,7 @@ class PostgresJobQueue:
 
     async def dequeue(self, *, kinds: Sequence[str] | None = None) -> Job | None:
         """Claim the oldest due job, or return ``None`` when there is nothing to do."""
-        if kinds:
-            statement = text(_DEQUEUE_TEMPLATE.format(kind_filter="AND kind = ANY(:kinds)")).bindparams(
-                bindparam("kinds", expanding=True)
-            )
-        else:
-            statement = text(_DEQUEUE_TEMPLATE.format(kind_filter=""))
+        statement = dequeue_statement(kinds)
 
         params: dict[str, object] = {
             "pending": STATUS_PENDING,
