@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowledge-brain"
+version = "0.1.0"
+description = "Obsidian RAG knowledge base backend — Git sync, hybrid retrieval, MCP endpoint"
+requires-python = ">=3.12"
+authors = [
+    {name = "KB Team"},
+]
+dependencies = [
+    # web / api
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    # multipart parsing for the upload endpoint — pulled in transitively by
+    # fastapi today, declared explicitly because the code depends on it directly
+    "python-multipart>=0.0.9",
+    # mcp 2.x: the server class moved to mcp.server.mcpserver.MCPServer
+    "mcp>=2.0",
+    # db
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "psycopg2-binary>=2.9",
+    # pgvector SQLAlchemy type — the `Vector` used by chunks.embedding
+    "pgvector>=0.5",
+    # config
+    "pydantic-settings>=2.5",
+    # converter
+    "markitdown>=0.1",
+    # PDF page-level extraction (markitdown's PDF path has no page numbers)
+    "pypdf>=5.0",
+    # spreadsheets, for sheet name + real cell rows in the locator
+    "openpyxl>=3.1",
+    # .kbignore matching (gitignore syntax)
+    "pathspec>=1.0",
+    # embedding
+    "httpx>=0.27",
+    # markdown frontmatter
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "testcontainers[postgres]>=4.0",
+]
+
+[project.scripts]
+kb = "kb.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires a real PostgreSQL container (see tests/integration/conftest.py)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

@@ -1,0 +1,12 @@
+{"query": "SKIP LOCKED 防止任务重复执行", "relevant": ["技术/队列设计.md"], "style": "keyword", "note": "关键词式：代码标识符，纯向量容易漏"}
+{"query": "websearch_to_tsquery 的用法", "relevant": ["技术/全文检索.md"], "style": "keyword"}
+{"query": "HNSW 索引参数 m 和 ef_construction", "relevant": ["技术/pgvector 调优.md"], "style": "keyword"}
+{"query": "怎么防止任务被两个 worker 同时领走", "relevant": ["技术/队列设计.md"], "style": "semantic", "note": "语义式：描述意图，不含专有名词"}
+{"query": "笔记改动之后怎么只重算变了的文件", "relevant": ["技术/增量同步.md"], "style": "semantic"}
+{"query": "为什么检索要返回这么多片段而不是前五条", "relevant": ["技术/检索设计决策.md"], "style": "semantic"}
+{"query": "换 embedding 模型之后要做什么", "relevant": ["技术/index_config.md", "运维/重建索引.md"], "style": "semantic"}
+{"query": "张三那个方案", "relevant": ["项目/张三方案讨论.md"], "style": "entity", "note": "实体式：人名，靠关键词路"}
+{"query": "Q3 复盘里提到的转化率问题", "relevant": ["复盘/2026-Q3 复盘.md"], "style": "entity"}
+{"query": "上次和财务对的那版预算", "relevant": ["项目/预算对齐.md"], "style": "entity"}
+{"query": "扫描件为什么搜不到", "relevant": ["运维/不可检索文件.md"], "style": "semantic"}
+{"query": ".kbignore 改了之后为什么还是搜不到", "relevant": ["运维/忽略规则.md"], "style": "keyword"}
