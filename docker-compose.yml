@@ -16,9 +16,12 @@
 name: knowledge-brain
 
 x-app: &app
-  build:
-    context: .
-    dockerfile: docker/Dockerfile.app
+  # No `build:` here on purpose. api and worker share the tag kb-app:local, and
+  # BuildKit builds every service that declares a build in parallel — two
+  # exporters racing for one tag means a cold `docker compose build` dies with
+  # `image "kb-app:local": already exists`. Only api declares the build; worker
+  # rides along on the image it produces (verified: `up` builds api first, then
+  # resolves worker's image locally instead of trying to pull it).
   image: kb-app:local
   env_file:
     - .env
@@ -66,6 +69,9 @@ services:
 
   api:
     <<: *app
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
     command: ["kb", "serve"]
     ports:
       - "${API_PORT:-8000}:8000"
