@@ -115,9 +115,25 @@ class FakeVaultStore:
 
     async def upsert_document(self, document: NewDocument) -> DocumentRecord:
         self.calls.append(f"upsert:{document.source_path}")
+        record = self.preview_upsert(document)
+        self.documents[(document.user_id, document.source, document.source_path)] = record
+        return record
+
+    def write_document(self, record: DocumentRecord) -> None:
+        """Store a record that a caller already holds.
+
+        A ``UnitOfWorkScope`` hands the row back before the transaction commits,
+        so the commit has to store *that* row. Re-deriving it here would mint a
+        second id and break the identity the caller was given.
+        """
+        self.calls.append(f"upsert:{record.source_path}")
+        self.documents[(record.user_id, record.source, record.source_path)] = record
+
+    def preview_upsert(self, document: NewDocument) -> DocumentRecord:
+        """The record an upsert would produce, without writing it."""
         key = (document.user_id, document.source, document.source_path)
         existing = self.documents.get(key)
-        record = DocumentRecord(
+        return DocumentRecord(
             id=existing.id if existing else document_id(),
             user_id=document.user_id,
             source=document.source,
@@ -127,8 +143,6 @@ class FakeVaultStore:
             conversion_status="ok",
             size_bytes=document.size_bytes,
         )
-        self.documents[key] = record
-        return record
 
     async def delete_document(self, *, user_id, source: str, source_path: str) -> bool:
         self.calls.append(f"delete:{source_path}")
@@ -147,61 +161,79 @@ class FakeVaultStore:
         self.synced_sha[repo_id] = sha
 
 
-class FakeEnqueuer:
-    """Records batches; can be told to fail on a specific batch index."""
-
-    def __init__(self, *, fail_on_batch: int | None = None) -> None:
-        self.batches: list[list[JobSpec]] = []
-        self.fail_on_batch = fail_on_batch
-        self._index = 0
-
-    async def enqueue_batch(self, specs) -> int:
-        batch = list(specs)
-        self.batches.append(batch)
-        if self.fail_on_batch is not None and self._index == self.fail_on_batch:
-            self._index += 1
-            raise RuntimeError("queue unavailable")
-        self._index += 1
-        return len(batch)
-
-    @property
-    def jobs(self) -> list[JobSpec]:
-        return [job for batch in self.batches for job in batch]
-
-
 class FakeScope:
-    """A ``UnitOfWorkScope`` that shares one store and one job log."""
+    """A ``UnitOfWorkScope`` that stages its writes until the scope commits.
 
-    def __init__(self, store: FakeVaultStore, jobs: list[JobSpec], scope_id: int) -> None:
+    Staging is the point of the double. A real scope rolls back everything when
+    its body raises, so a fake that wrote straight through would let a test
+    assert a document row that production had already discarded — which is the
+    one failure these tests exist to detect.
+    """
+
+    def __init__(self, store: FakeVaultStore, scope_id: int, *, fail_on_enqueue: bool = False) -> None:
         self._store = store
-        self._jobs = jobs
         self.scope_id = scope_id
+        self._fail_on_enqueue = fail_on_enqueue
+        self.staged: list[tuple[NewDocument, DocumentRecord]] = []
         self.enqueued_in_scope: list[JobSpec] = []
         self.committed = False
 
-    def __getattr__(self, name):
-        return getattr(self._store, name)
+    @property
+    def staged_documents(self) -> list[NewDocument]:
+        return [document for document, _record in self.staged]
+
+    # -- reads go straight through; nothing has been written yet ------------
+
+    async def find_document(self, *, user_id, source: str, source_path: str) -> DocumentRecord | None:
+        return await self._store.find_document(user_id=user_id, source=source, source_path=source_path)
+
+    async def list_document_paths(self, *, user_id, source: str) -> list[str]:
+        return await self._store.list_document_paths(user_id=user_id, source=source)
+
+    # -- writes are staged -------------------------------------------------
+
+    async def upsert_document(self, document: NewDocument) -> DocumentRecord:
+        record = self._store.preview_upsert(document)
+        self.staged.append((document, record))
+        return record
 
     async def enqueue(self, spec: JobSpec) -> int:
+        if self._fail_on_enqueue and not self.enqueued_in_scope:
+            raise RuntimeError("queue unavailable")
         self.enqueued_in_scope.append(spec)
-        self._jobs.append(spec)
-        return len(self._jobs)
+        return len(self.enqueued_in_scope)
+
+    # -- commit ------------------------------------------------------------
+
+    async def commit(self) -> None:
+        """Apply the staged writes. Called by ``FakeUnitOfWork``, never by tests."""
+        for _document, record in self.staged:
+            self._store.write_document(record)
+        self.committed = True
 
 
 class FakeUnitOfWork:
-    """Opens scopes that share state with the store, for upload tests."""
+    """Opens scopes that share one store and one job log.
 
-    def __init__(self, store: FakeVaultStore | None = None) -> None:
+    ``fail_on_scope`` makes the *n*-th scope blow up on its first enqueue, which
+    is how the red-line test simulates a batch that never lands.
+    """
+
+    def __init__(self, store: FakeVaultStore | None = None, *, fail_on_scope: int | None = None) -> None:
         self.store = store or FakeVaultStore()
         self.jobs: list[JobSpec] = []
         self.scopes: list[FakeScope] = []
+        self.fail_on_scope = fail_on_scope
 
     @asynccontextmanager
     async def begin(self, user_id: uuid.UUID):
-        scope = FakeScope(self.store, self.jobs, len(self.scopes) + 1)
+        index = len(self.scopes)
+        scope = FakeScope(self.store, index + 1, fail_on_enqueue=(self.fail_on_scope == index))
         self.scopes.append(scope)
+        # Nothing below runs when the body raises, which is what rollback means.
         yield scope
-        scope.committed = True
+        await scope.commit()
+        self.jobs.extend(scope.enqueued_in_scope)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +402,7 @@ def make_services(**overrides):
         repos=None,
         queue=None,
         vault=None,
+        unit_of_work=None,
         upload=None,
         indexer=None,
         index_writer=None,

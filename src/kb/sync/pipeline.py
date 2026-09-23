@@ -5,9 +5,18 @@ The flow for one repository (spec §6):
 1. fetch, resolve the branch head; an unchanged SHA ends the run immediately;
 2. first sync (no ``last_synced_sha``) or a ``.kbignore`` edit → full comparison
    against the tree, otherwise a diff between the two commits;
-3. per change: apply the short circuits, enqueue a ``doc_index`` job for what is
-   genuinely new;
+3. per change: apply the short circuits, then write the ``documents`` row and
+   enqueue its ``doc_index`` job **in one transaction** for what is genuinely
+   new;
 4. **advance ``last_synced_sha`` only after every batch has been enqueued.**
+
+Step 3 writes the row here rather than leaving it to the indexer because the
+indexer only calls ``update_document`` — it needs a row to exist. Writing the
+row and the job together is not a style preference: a row without its job would
+match ``content_sha`` on the next sync and take the level-1 short circuit, so the
+file would be reported as ``skipped`` and never indexed at all. That is silent,
+permanent data loss, and it is exactly the failure ``UnitOfWork`` exists to make
+impossible (spec §4).
 
 Step 4 is the second red line in spec §11.1. Advancing early is the classic
 silent data-loss bug in a sync system: the next diff starts from a commit whose
@@ -49,7 +58,7 @@ from kb.sync.diff import (
 )
 from kb.sync.git import GitClient
 from kb.sync.ignore import KBIGNORE_FILENAME, IgnoreRules, needs_full_rescan, parse_kbignore
-from kb.sync.ports import SOURCE_GIT, JobEnqueuer, JobPayload, RepoRef, VaultStore
+from kb.sync.ports import SOURCE_GIT, JobPayload, NewDocument, RepoRef, UnitOfWork, VaultStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,31 +88,44 @@ class SyncOutcome:
         return self.added + self.modified + self.renamed + self.deleted
 
 
+@dataclass(slots=True)
+class PendingIndex:
+    """A ``documents`` row together with the ``doc_index`` job that will index it.
+
+    Carried as one value rather than two parallel lists so the pairing cannot
+    come apart: every job written by this pipeline has exactly one row beside it,
+    and ``_enqueue`` commits them in the same transaction.
+    """
+
+    document: NewDocument
+    job: JobSpec
+
+
 class SyncPipeline:
     def __init__(
         self,
         *,
         git_factory,
         store: VaultStore,
-        enqueuer: JobEnqueuer,
+        unit_of_work: UnitOfWork,
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_file_size_bytes: int | None = None,
     ) -> None:
         self._git_factory = git_factory
         self._store = store
-        self._enqueuer = enqueuer
+        self._unit_of_work = unit_of_work
         self._batch_size = max(1, batch_size)
         self._max_file_size_bytes = max_file_size_bytes
 
     @classmethod
-    def from_settings(cls, *, git_factory, store, enqueuer) -> SyncPipeline:
+    def from_settings(cls, *, git_factory, store, unit_of_work) -> SyncPipeline:
         from kb.config import get_settings
 
         settings = get_settings()
         return cls(
             git_factory=git_factory,
             store=store,
-            enqueuer=enqueuer,
+            unit_of_work=unit_of_work,
             batch_size=settings.sync_batch_size,
             max_file_size_bytes=settings.max_file_size_bytes,
         )
@@ -123,7 +145,7 @@ class SyncPipeline:
         rules = await self._load_rules(git, new_sha)
         events = await self._collect_events(git, repo, rules, outcome)
 
-        pending: list[JobSpec] = []
+        pending: list[PendingIndex] = []
         for event in events:
             await self._apply_event(git, repo, rules, event, new_sha, pending, outcome)
 
@@ -184,7 +206,7 @@ class SyncPipeline:
         rules: IgnoreRules,
         event: ChangeEvent,
         revision: str,
-        pending: list[JobSpec],
+        pending: list[PendingIndex],
         outcome: SyncOutcome,
     ) -> None:
         if event.path == KBIGNORE_FILENAME:
@@ -239,16 +261,25 @@ class SyncPipeline:
             await self._store.delete_document(user_id=repo.user_id, source=SOURCE_GIT, source_path=event.old_path)
 
         pending.append(
-            JobSpec(
-                user_id=repo.user_id,
-                kind=JOB_DOC_INDEX,
-                repo_id=repo.id,
-                payload=JobPayload(
+            PendingIndex(
+                document=NewDocument(
+                    user_id=repo.user_id,
                     source=SOURCE_GIT,
                     source_path=event.path,
                     content_sha=content_sha,
                     size_bytes=size,
-                ).as_dict(),
+                ),
+                job=JobSpec(
+                    user_id=repo.user_id,
+                    kind=JOB_DOC_INDEX,
+                    repo_id=repo.id,
+                    payload=JobPayload(
+                        source=SOURCE_GIT,
+                        source_path=event.path,
+                        content_sha=content_sha,
+                        size_bytes=size,
+                    ).as_dict(),
+                ),
             )
         )
         if existing is None:
@@ -258,19 +289,25 @@ class SyncPipeline:
 
     # -- enqueueing ---------------------------------------------------------
 
-    async def _enqueue(self, repo: RepoRef, specs: list[JobSpec]) -> tuple[int, int]:
-        """Enqueue in batches, committing each before starting the next (spec §6).
+    async def _enqueue(self, repo: RepoRef, pending: list[PendingIndex]) -> tuple[int, int]:
+        """Write each batch's document rows and enqueue their jobs (spec §6).
 
-        A first full sync can be tens of thousands of files; enqueueing them in
-        one transaction would be a single enormous commit and a crash would lose
-        all of it. Batching makes progress durable, and `documents` records what
-        actually landed.
+        One transaction per batch, and the row and the job go in together. A
+        first full sync can be tens of thousands of files; enqueueing them in one
+        transaction would be a single enormous commit and a crash would lose all
+        of it. Batching makes progress durable — and, because each batch is one
+        ``UnitOfWork`` scope, it also makes the pairing durable: what landed in
+        ``documents`` is exactly what has a job waiting for it.
         """
         total = 0
         batches = 0
-        for start in range(0, len(specs), self._batch_size):
-            batch = specs[start : start + self._batch_size]
-            total += await self._enqueuer.enqueue_batch(batch)
+        for start in range(0, len(pending), self._batch_size):
+            batch = pending[start : start + self._batch_size]
+            async with self._unit_of_work.begin(repo.user_id) as scope:
+                for item in batch:
+                    await scope.upsert_document(item.document)
+                    await scope.enqueue(item.job)
+            total += len(batch)
             batches += 1
         return total, batches
 
@@ -285,6 +322,7 @@ __all__ = [
     "STATUS_MODIFIED",
     "STATUS_RENAMED",
     "STATUS_TYPECHANGE",
+    "PendingIndex",
     "SyncOutcome",
     "SyncPipeline",
 ]

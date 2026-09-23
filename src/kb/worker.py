@@ -56,10 +56,14 @@ class Worker:
         # Built from ``services.settings``, not from ``get_settings()``: the
         # process already has one settings object and re-reading the environment
         # would let the worker's batch size and the API's disagree.
+        # ``unit_of_work``, not the raw queue: the pipeline writes a document row
+        # and its indexing job in one transaction, and only the scope can do
+        # both. Handing it the queue instead would let a row land without a job,
+        # and the next sync would then short-circuit that file as unchanged.
         self._pipeline = SyncPipeline(
             git_factory=default_git_factory(workdir_root=settings.git_workdir_root),
             store=services.vault,
-            enqueuer=services.queue,
+            unit_of_work=services.unit_of_work,
             batch_size=settings.sync_batch_size,
             max_file_size_bytes=settings.max_file_size_bytes,
         )
