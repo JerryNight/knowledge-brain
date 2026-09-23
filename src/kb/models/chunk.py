@@ -32,7 +32,9 @@ from kb.models.base import Base
 
 # embedding 维度。由 provider 决定，建表时固定；换模型 = 全量重跑（spec §5 ④）
 # 与 settings.embedding_dim 保持一致；模型层不读配置，避免导入期依赖环境变量。
-EMBEDDING_DIM = 1536
+# 与本常量、settings 默认值、迁移链终态的三方一致性由
+# tests/unit/test_embedding_dim_guard.py 强制校验。
+EMBEDDING_DIM = 1024
 
 # 全文检索的 text search configuration。刻意不做成配置项：生成列的表达式会被
 # 固化进 DDL，若运行时可改就会与 schema 漂移。改名意味着一次重写列 + 重建索引的迁移。

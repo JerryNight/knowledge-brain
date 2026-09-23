@@ -105,6 +105,30 @@ async def test_out_of_order_api_response_is_reassembled_by_index() -> None:
     assert await embedder.embed(["one", "two"]) == [vector(1), vector(2)]
 
 
+async def test_the_width_is_declared_on_every_request() -> None:
+    """The provider's default width is not necessarily ours, so it is stated.
+
+    Measured against DashScope before this was written: omitting ``dimensions``
+    yields 1024 whatever the model, and asking ``qwen3.7-text-embedding-flash``
+    for 1536 is *silently coerced* to 1024 rather than rejected. Sending it keeps
+    the wire in agreement with the vector column; without it, two independent
+    defaults have to coincide for the index to stay correct.
+    """
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        return ok_response([vector(len(text)) for text in payload["input"]])
+
+    embedder = make_embedder(handler, batch_size=2)
+    await embedder.embed(["aa", "bbb", "c"])
+
+    assert len(payloads) == 2  # 2 + 1
+    assert [payload["dimensions"] for payload in payloads] == [DIM, DIM]
+    assert payloads[0]["model"] == "test-model"
+
+
 # ---------------------------------------------------------------------------
 # retries
 # ---------------------------------------------------------------------------
@@ -183,7 +207,12 @@ async def test_transport_failures_are_retried() -> None:
 
 
 async def test_dimension_mismatch_is_rejected() -> None:
-    """A silently wrong dimension would corrupt the vector column."""
+    """A silently wrong dimension would corrupt the vector column.
+
+    Not hypothetical: DashScope answers HTTP 200 with its own default width when
+    asked for one the model cannot produce, instead of erroring. This assertion
+    is the backstop that turns that into a failure.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         return ok_response([[0.0, 1.0]])

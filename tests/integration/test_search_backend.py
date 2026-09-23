@@ -27,13 +27,12 @@ import pytest
 from sqlalchemy import text
 
 from kb.db.adapters.search import PostgresSearchBackend
+from kb.models.chunk import EMBEDDING_DIM
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-
-EMBEDDING_DIM = 1536
 
 # Identical for both tenants on purpose: a shared path, shared text and a shared
 # embedding means a leak shows up as a wrong chunk id, not as an empty result.
@@ -42,7 +41,11 @@ UNRELATED_TEXT = "红烧肉的做法与火候控制"
 
 
 def vector(*hot: int) -> list[float]:
-    """A near-one-hot vector: 1.0 at ``hot``, 0.0 elsewhere."""
+    """A near-one-hot vector: 1.0 at ``hot``, 0.0 elsewhere.
+
+    Sized by ``kb.models.chunk.EMBEDDING_DIM`` rather than a local constant, so
+    the seeded vectors cannot drift from the width the migrations produced.
+    """
     values = [0.0] * EMBEDDING_DIM
     for index in hot:
         values[index] = 1.0

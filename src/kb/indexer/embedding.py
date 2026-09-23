@@ -132,7 +132,14 @@ class OpenAICompatibleEmbedder:
     # -- internals ----------------------------------------------------------
 
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        payload: dict[str, Any] = {"model": self.model, "input": batch}
+        # `dimensions` is declared rather than left to the provider's default.
+        # Measured on DashScope: the default is 1024 whatever the model, and an
+        # unsupported value is *silently coerced* — asking
+        # qwen3.7-text-embedding-flash for 1536 answers HTTP 200 with 1024
+        # floats. Sending it makes the wire agree with `self.dim`; `_parse`
+        # below is the backstop that turns any remaining mismatch into an error
+        # instead of a wrongly-shaped vector in the index.
+        payload: dict[str, Any] = {"model": self.model, "input": batch, "dimensions": self.dim}
         last_error = "unknown error"
 
         for attempt in range(1, self._max_retries + 1):
@@ -198,7 +205,13 @@ class OpenAICompatibleEmbedder:
         vectors = [list(item["embedding"]) for item in ordered]
         for vector in vectors:
             if len(vector) != self.dim:
-                raise EmbeddingError(f"provider returned dimension {len(vector)}, index expects {self.dim}")
+                raise EmbeddingError(
+                    f"provider returned dimension {len(vector)}, index expects {self.dim}. "
+                    "Either the configured model cannot produce EMBEDDING_DIM (providers "
+                    "generally fall back to their own default instead of erroring), or the "
+                    "database schema was built at a different dimension than the settings say. "
+                    "Fix the configuration, then run a full rebuild — never append."
+                )
         return vectors
 
 

@@ -48,12 +48,21 @@ class Settings(BaseSettings):
     public_base_url: str = Field(default="http://localhost:8000", alias="PUBLIC_BASE_URL")
 
     # ---------- embedding ----------
-    embedding_provider: str = Field(default="openai", alias="EMBEDDING_PROVIDER")
-    embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
-    embedding_dim: int = Field(default=1536, alias="EMBEDDING_DIM")
-    embedding_api_base: str = Field(default="https://api.openai.com/v1", alias="EMBEDDING_API_BASE")
+    # Defaults describe the deployment this project actually runs on (Aliyun
+    # Bailian, through its OpenAI-compatible route); .env is what decides in
+    # practice. `embedding_dim` must agree with kb.models.chunk.EMBEDDING_DIM and
+    # with the final state of the migration chain — enforced by
+    # tests/unit/test_embedding_dim_guard.py.
+    embedding_provider: str = Field(default="dashscope", alias="EMBEDDING_PROVIDER")
+    embedding_model: str = Field(default="qwen3.7-text-embedding-flash", alias="EMBEDDING_MODEL")
+    embedding_dim: int = Field(default=1024, alias="EMBEDDING_DIM")
+    embedding_api_base: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1", alias="EMBEDDING_API_BASE"
+    )
     embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
-    embedding_batch_size: int = Field(default=64, alias="EMBEDDING_BATCH_SIZE")
+    # The provider's real ceiling for this model is 25 texts per request (the
+    # documentation claims 20); 20 keeps a margin and stays inside the docs.
+    embedding_batch_size: int = Field(default=20, alias="EMBEDDING_BATCH_SIZE")
     embedding_max_concurrency: int = Field(default=8, alias="EMBEDDING_MAX_CONCURRENCY")
     query_cache_size: int = Field(default=1024, alias="QUERY_CACHE_SIZE")
 
