@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     sync_batch_size: int = Field(default=500, alias="SYNC_BATCH_SIZE")
     max_file_size_bytes: int = Field(default=52_428_800, alias="MAX_FILE_SIZE_BYTES")
 
+    # ---------- storage ----------
+    # Where the bare partial clones live, one directory per repo id. Nothing
+    # needs a working tree, so this is scratch space that can always be rebuilt
+    # from the remote (spec §5: the index is a derivative).
+    git_workdir_root: str = Field(default="var/git", alias="GIT_WORKDIR_ROOT")
+    # Uploaded originals. Spec §7 约束 6 keeps conversion server-side, so the
+    # original has to be kept: a parser swap must not require re-uploading.
+    blob_store_path: str = Field(default="var/blobs", alias="BLOB_STORE_PATH")
+
     # ---------- retrieval ----------
     retrieval_default_limit: int = Field(default=25, alias="RETRIEVAL_DEFAULT_LIMIT")
     retrieval_max_limit: int = Field(default=50, alias="RETRIEVAL_MAX_LIMIT")
