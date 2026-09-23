@@ -47,9 +47,10 @@ Docker 已换成 WSL 原生引擎（`docker.io` 29.1.3 + `docker-compose-v2` 2.4
    `ix_chunks_embedding_hnsw`。回归守卫：`tests/unit/test_retrieval_sql.py`。
 2. **关键词路用不上 GIN，属于结构性限制**：RLS 把策略谓词当作安全屏障，非 `leakproof`
    的 `tsv @@ tsquery` 不能下推。已实测排除"改写成 leakproof 形式"这条路（`pg_catalog`
-   里 `@@` 的全部重载都是 `leakproof=false`）。三个方向（接受 / `SECURITY DEFINER` /
-   分区）的取舍见 findings 文档 §三 —— 当前建议**接受**，因为本项目租户数≈1，
-   分区带不来收益，而另两个方向要削弱 spec §11.1 红线。
+   里 `@@` 的全部重载都是 `leakproof=false`）。四个方向（接受 / `SECURITY DEFINER` /
+   分区 / 移除 RLS）的取舍见 findings 文档 §三 —— **2026-09-23 拍板：接受现状**。
+   分区因租户数≈1 无收益；"移除 RLS"因收益与方向 2 等价而风险半径大一个量级被否掉；
+   触发条件与后续路径见该文档 §三「决策」。
 
 **搁置项**：
 - M9 用真实笔记构造 50~100 条查询并跑基线
@@ -332,8 +333,9 @@ knowledge-brain/
 
 **M7.2 的已知限制（结构性）**：RLS 把策略谓词当作安全屏障，非 `leakproof` 的
 `tsv @@ tsquery` 无法下推到索引 —— 应用角色下 GIN 索引用不上，关键词路扫本租户语料
-（50k chunks 实测 8 ms，代价与单个租户的语料量成正比）。三个方向的取舍见
-`docs/m7-index-usage-findings.md` §三，当前建议**接受现状**。
+（50k chunks 实测 8 ms，代价与单个租户的语料量成正比）。四个方向的取舍见
+`docs/m7-index-usage-findings.md` §三，**2026-09-23 拍板：接受现状**（触发条件：单租户
+chunks ≈ 1M 或关键词 p95 > 50 ms，届时优先 `SECURITY DEFINER` 方向）。
 
 ---
 

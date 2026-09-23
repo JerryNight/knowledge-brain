@@ -246,8 +246,8 @@ uv run python scripts/explain_retrieval.py     # 需要已迁移的库 + 一份�
 EXPLAIN 是不等价的：`LIMIT` 的位置、过滤条件的形状都会改变计划。
 
 关键词路的 `ix_chunks_tsv_gin` 在 RLS 下**结构性不可用**（RLS 谓词是安全屏障，
-非 `leakproof` 的 `tsv @@ tsquery` 不能下推），原因、实测数据与三个候选方向见
-`docs/m7-index-usage-findings.md`。
+非 `leakproof` 的 `tsv @@ tsquery` 不能下推）。原因、实测数据、四个候选方向与
+**2026-09-23 的拍板结论（接受现状，并保留触发条件）**见 `docs/m7-index-usage-findings.md` §三。
 
 单元测试覆盖的核心行为，都是"排错了很难发现"的那一类：
 
@@ -263,6 +263,7 @@ EXPLAIN 是不等价的：`LIMIT` 的位置、过滤条件的形状都会改变�
 | `test_mcp_tools.py` | spec §9 的结果格式：空结果给文案、转换产物显式标注 |
 | `test_evaluate.py` | Recall@k / MRR 的手算校验；评估集格式校验 |
 | `test_tenant_scoping_guard.py` | 结构性守卫（见下） |
+| `test_rls_policy_guard.py` | 🔴 迁移必须保持 ENABLE + FORCE + policy，且 `kb_app` 不得 `BYPASSRLS`（见下） |
 
 ### 租户隔离：两层闸门
 
@@ -280,6 +281,16 @@ spec §5 ② 要求应用层与数据库层各挡一道，任一层失效都不�
 `app.user_id` 用 `set_config(..., is_local => true)` 注入，随事务结束自动失效——
 **不需要**在连接归还连接池时手动 reset，也就不存在"漏了一次 reset 就串租户"的隐患。
 `test_tenant_binding_does_not_survive_the_transaction` 在同一条物理连接上验证了这一点。
+
+第四道是**撤销守卫**：`tests/unit/test_rls_policy_guard.py` 断言初始迁移保持
+`ENABLE` + `FORCE` + `CREATE POLICY`、没有任何迁移出现 `DISABLE` / `NO FORCE` /
+`DROP POLICY tenant_isolation`，且 `kb_app` 不得是 `BYPASSRLS`。
+
+> 这道守卫是为了一个具体的诱惑而存在的：关键词路的 `ix_chunks_tsv_gin` 在 RLS 下用不上，
+> 而"关掉 RLS"能让它立刻可用。**这条路已被否决**（收益仅 ~7 ms/次，代价是隔离从数据库
+> 保证降级为约定）。决策与触发条件见 `docs/m7-index-usage-findings.md` §三。
+> RLS 那批集成用例需要真实 Postgres、Docker 不可用时整个 skip，所以撤销不会自动变红——
+> 这个守卫补的就是这个盲区。
 
 ### 检索质量评估
 

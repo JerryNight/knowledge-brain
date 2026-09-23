@@ -440,8 +440,13 @@ def chunk_keyword_search(
     reachable while ``chunks`` has row-level security. The policy predicate acts
     as a security barrier and ``tsvector @@ tsquery`` is not leakproof, so it
     cannot be pushed down to the index (cost 2265.80 with RLS, 38.96 without).
-    This branch therefore scans its tenant's chunks. See
-    ``docs/m7-index-usage-findings.md``.
+    This branch therefore scans its tenant's chunks.
+
+    Reviewed and accepted on 2026-09-23 — the policy is **not** being dropped to
+    win the index back (it would save ~7 ms per query while downgrading isolation
+    from a database guarantee to a convention). Rationale, trigger conditions and
+    the rejected alternatives: ``docs/m7-index-usage-findings.md`` §三;
+    ``tests/unit/test_rls_policy_guard.py`` keeps it from being undone silently.
     """
     tsquery = func.websearch_to_tsquery(TS_CONFIG, query)
     rank = func.ts_rank(Chunk.tsv, tsquery)
