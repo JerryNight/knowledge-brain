@@ -2,8 +2,8 @@
 
 This is a thin mapper: the SQL itself lives in
 ``kb.retrieval.query_builder`` because that module is the single place allowed to
-write a tenant-scoped query. What this class adds is the transaction boundary and
-the row→``ChunkCandidate`` translation.
+write a tenant-scoped query. What this class adds is the transaction boundary,
+the metadata-filter resolution, and the row→``ChunkCandidate`` translation.
 
 Both branches return ``ChunkCandidate`` objects with a ``branch`` tag, which is
 what lets the retrieval service fuse two ranked lists whose scores are on
@@ -18,9 +18,10 @@ converting to a similarity would invite exactly that mistake.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
+from sqlalchemy import Select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from kb.db.tenant import tenant_transaction
@@ -57,10 +58,12 @@ class PostgresSearchBackend:
         tags: Sequence[str] | None = None,
         path_prefix: str | None = None,
     ) -> list[ChunkCandidate]:
-        statement = qb.chunk_vector_search(
-            user_id, embedding, limit=limit, tags=tags, path_prefix=path_prefix
+        def build(document_ids: list[uuid.UUID] | None) -> Select:
+            return qb.chunk_vector_search(user_id, embedding, limit=limit, document_ids=document_ids)
+
+        return await self._candidates(
+            user_id, build=build, branch=BRANCH_VECTOR, tags=tags, path_prefix=path_prefix
         )
-        return await self._run(statement, user_id, branch=BRANCH_VECTOR)
 
     async def keyword_search(
         self,
@@ -71,14 +74,43 @@ class PostgresSearchBackend:
         tags: Sequence[str] | None = None,
         path_prefix: str | None = None,
     ) -> list[ChunkCandidate]:
-        statement = qb.chunk_keyword_search(
-            user_id, query, limit=limit, tags=tags, path_prefix=path_prefix
-        )
-        return await self._run(statement, user_id, branch=BRANCH_KEYWORD)
+        def build(document_ids: list[uuid.UUID] | None) -> Select:
+            return qb.chunk_keyword_search(user_id, query, limit=limit, document_ids=document_ids)
 
-    async def _run(self, statement, user_id: uuid.UUID, *, branch: str) -> list[ChunkCandidate]:
+        return await self._candidates(
+            user_id, build=build, branch=BRANCH_KEYWORD, tags=tags, path_prefix=path_prefix
+        )
+
+    async def _candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        build: Callable[[list[uuid.UUID] | None], Select],
+        branch: str,
+        tags: Sequence[str] | None,
+        path_prefix: str | None,
+    ) -> list[ChunkCandidate]:
+        """Resolve the metadata filters, then run one branch.
+
+        Both statements share one transaction, so the allow-list and the
+        candidates are always computed against the same snapshot.
+
+        Resolving the filter first is what keeps the index: the metadata lives
+        on ``documents``, and joining to it in the scoring stage defeats HNSW.
+        No filter means no second round trip.
+        """
         async with tenant_transaction(self._sessionmaker, user_id) as session:
-            rows = (await session.execute(statement)).mappings().all()
+            document_ids: list[uuid.UUID] | None = None
+            if tags or path_prefix:
+                resolved = await session.execute(
+                    qb.documents_matching_filters(user_id, tags=tags, path_prefix=path_prefix)
+                )
+                document_ids = list(resolved.scalars().all())
+                if not document_ids:
+                    # Nothing carries these tags; asking the branch would be a
+                    # full index walk for a guaranteed-empty answer.
+                    return []
+            rows = (await session.execute(build(document_ids))).mappings().all()
         return [_to_candidate(dict(row), branch=branch) for row in rows]
 
 

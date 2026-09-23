@@ -321,24 +321,37 @@ def set_repo_sync_enabled(user_id: uuid.UUID | str, repo_id: uuid.UUID, enabled:
 
 # -- retrieval branches (spec §8) -------------------------------------------
 
-# The columns every retrieval path returns. Selecting them explicitly keeps the
-# two branches symmetric, so RRF can key on chunk id without either side
-# depending on ORM identity.
-def _hit_columns(distance_or_rank):
+# What a branch scores. Selecting these explicitly keeps the two branches
+# symmetric, so RRF can key on chunk id without either side depending on ORM
+# identity. Document metadata is deliberately absent — see `_attach_documents`.
+def _candidate_columns(score_expression):
     return (
         Chunk.id.label("chunk_id"),
         Chunk.document_id.label("document_id"),
         Chunk.text.label("text"),
         Chunk.heading_path.label("heading_path"),
         Chunk.locator.label("locator"),
-        Document.source.label("source"),
-        Document.source_path.label("source_path"),
-        Document.title.label("title"),
-        distance_or_rank,
+        score_expression.label("score"),
     )
 
 
-def _apply_filters(statement: Select, tags: Sequence[str] | None, path_prefix: str | None) -> Select:
+def documents_matching_filters(
+    user_id: uuid.UUID | str,
+    *,
+    tags: Sequence[str] | None = None,
+    path_prefix: str | None = None,
+) -> Select:
+    """Ids of a tenant's documents matching the metadata filters.
+
+    These filters live on ``documents``, but the scoring stage of a branch must
+    not join to it (see `_attach_documents`), so they are resolved up front in
+    this separate, cheap query and handed down as a plain allow-list.
+
+    The distinction is not cosmetic. Written as an ``IN (subquery)`` the planner
+    de-correlates the filter into a hash join and the vector branch loses HNSW
+    again: measured 6352 ms, versus 8.1 ms once the ids arrive as an array.
+    """
+    statement = scoped_documents(user_id).with_only_columns(Document.id)
     if tags:
         # ARRAY overlap (&&): matching any requested tag, which is what a user
         # filtering by tag means.
@@ -348,33 +361,64 @@ def _apply_filters(statement: Select, tags: Sequence[str] | None, path_prefix: s
     return statement
 
 
+def _attach_documents(user_id: uuid.UUID | str, inner: Select, *, ascending: bool) -> Select:
+    """Attach document metadata to an already-limited candidate query.
+
+    The ``LIMIT`` has to be applied *inside* the CTE, before the join — that is
+    the entire point of this shape. An HNSW index scan carries a very high
+    startup cost (pgvector estimates ~2500 before the first row), so it only
+    pays off when a ``Limit`` node can sit directly on top of it. Insert a join
+    in between and the planner can no longer push the ``LIMIT`` down; it falls
+    back to "scan every chunk, sort, keep 40", and the index is never chosen.
+    On 50k chunks that is 5935 ms against 5.7 ms.
+    """
+    top = inner.cte("top")
+    ordering = top.c.score.asc() if ascending else top.c.score.desc()
+    return (
+        select(
+            top.c.chunk_id,
+            top.c.document_id,
+            top.c.text,
+            top.c.heading_path,
+            top.c.locator,
+            top.c.score,
+            Document.source,
+            Document.source_path,
+            Document.title,
+        )
+        .select_from(top)
+        .join(Document, Document.id == top.c.document_id)
+        # Repeated rather than inherited from the join — see the module docstring.
+        .where(Document.user_id == tenant_id(user_id))
+        .order_by(ordering)
+    )
+
+
 def chunk_vector_search(
     user_id: uuid.UUID | str,
     embedding: Sequence[float],
     *,
     limit: int = DEFAULT_BRANCH_LIMIT,
-    tags: Sequence[str] | None = None,
-    path_prefix: str | None = None,
+    document_ids: Sequence[uuid.UUID] | None = None,
 ) -> Select:
     """Vector branch: cosine distance over the HNSW index, top ``limit``.
 
     The ``ORDER BY`` expression is the same one the index was built for
-    (``vector_cosine_ops``), which is what lets Postgres use HNSW instead of
-    computing the distance for every row.
+    (``vector_cosine_ops``), which is what lets Postgres walk the index instead
+    of computing the distance for every row.
+
+    ``document_ids`` is the allow-list from `documents_matching_filters`;
+    ``None`` means no metadata filter was requested, which is not the same as an
+    empty list — an empty allow-list must match nothing, and ``in_([])`` renders
+    as a false constant so that falls out correctly.
     """
-    distance = Chunk.embedding.cosine_distance(list(embedding)).label("score")
     tenant = tenant_id(user_id)
-    statement = (
-        select(*_hit_columns(distance))
-        .join(Document, Document.id == Chunk.document_id)
-        .where(
-            Chunk.user_id == tenant,
-            Document.user_id == tenant,
-            Chunk.embedding.is_not(None),
-        )
-    )
-    statement = _apply_filters(statement, tags, path_prefix)
-    return statement.order_by(Chunk.embedding.cosine_distance(list(embedding))).limit(limit)
+    distance = Chunk.embedding.cosine_distance(list(embedding))
+    conditions = [Chunk.user_id == tenant, Chunk.embedding.is_not(None)]
+    if document_ids is not None:
+        conditions.append(Chunk.document_id.in_(list(document_ids)))
+    inner = select(*_candidate_columns(distance)).where(*conditions).order_by(distance).limit(limit)
+    return _attach_documents(user_id, inner, ascending=True)
 
 
 def chunk_keyword_search(
@@ -382,8 +426,7 @@ def chunk_keyword_search(
     query: str,
     *,
     limit: int = DEFAULT_BRANCH_LIMIT,
-    tags: Sequence[str] | None = None,
-    path_prefix: str | None = None,
+    document_ids: Sequence[uuid.UUID] | None = None,
 ) -> Select:
     """Keyword branch: ``websearch_to_tsquery`` over the GIN-indexed ``tsv``.
 
@@ -392,21 +435,22 @@ def chunk_keyword_search(
     degrades gracefully instead of erroring on punctuation. The whole branch
     depends on zhparser: without it Chinese text is one token per sentence and
     this path finds nothing (spec §5 坑).
+
+    Known limitation, measured rather than assumed: ``ix_chunks_tsv_gin`` is not
+    reachable while ``chunks`` has row-level security. The policy predicate acts
+    as a security barrier and ``tsvector @@ tsquery`` is not leakproof, so it
+    cannot be pushed down to the index (cost 2265.80 with RLS, 38.96 without).
+    This branch therefore scans its tenant's chunks. See
+    ``docs/m7-index-usage-findings.md``.
     """
     tsquery = func.websearch_to_tsquery(TS_CONFIG, query)
-    rank = func.ts_rank(Chunk.tsv, tsquery).label("score")
+    rank = func.ts_rank(Chunk.tsv, tsquery)
     tenant = tenant_id(user_id)
-    statement = (
-        select(*_hit_columns(rank))
-        .join(Document, Document.id == Chunk.document_id)
-        .where(
-            Chunk.user_id == tenant,
-            Document.user_id == tenant,
-            Chunk.tsv.op("@@")(tsquery),
-        )
-    )
-    statement = _apply_filters(statement, tags, path_prefix)
-    return statement.order_by(rank.desc()).limit(limit)
+    conditions = [Chunk.user_id == tenant, Chunk.tsv.op("@@")(tsquery)]
+    if document_ids is not None:
+        conditions.append(Chunk.document_id.in_(list(document_ids)))
+    inner = select(*_candidate_columns(rank)).where(*conditions).order_by(rank.desc()).limit(limit)
+    return _attach_documents(user_id, inner, ascending=False)
 
 
 def chunks_by_ids(user_id: uuid.UUID | str, chunk_ids: Sequence[int]) -> Select:
