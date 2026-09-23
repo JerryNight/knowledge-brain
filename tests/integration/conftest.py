@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -155,9 +155,18 @@ def pg_dsns() -> Dsns:
     """Start PostgreSQL from the project image and migrate it to head."""
     try:
         from testcontainers.core.container import DockerContainer
-        from testcontainers.core.exceptions import DockerException
-    except ImportError:  # pragma: no cover - dependency is declared, this is a guard
-        pytest.skip("testcontainers is not installed; install with `uv sync --extra dev`")
+        from testcontainers.core.exceptions import ContainerStartException
+    except ImportError as exc:  # pragma: no cover - dependency is declared, this is a guard
+        # Report *why* the import failed. This guard used to swallow any
+        # ImportError as "testcontainers is not installed", which is how the
+        # whole tenant-isolation suite came to skip silently: testcontainers 4.x
+        # dropped `DockerException` from this module, so the second import blew
+        # up while testcontainers was installed and working.
+        pytest.skip(f"testcontainers is not importable: {exc}")
+
+    # `docker` is a transitive dependency of testcontainers, and this is the
+    # exception the SDK raises when no daemon answers.
+    from docker.errors import DockerException
 
     container = (
         DockerContainer(PG_IMAGE)
@@ -170,11 +179,11 @@ def pg_dsns() -> Dsns:
 
     try:
         container.start()
-    except DockerException as exc:
+    except (ContainerStartException, DockerException) as exc:
         pytest.skip(
             f"cannot start {PG_IMAGE}: {exc}\n"
-            "Integration tests need Docker and the project's PostgreSQL image. "
-            "Start Docker Desktop, then run `docker compose build postgres`."
+            "Integration tests need a running Docker daemon and the project's "
+            "PostgreSQL image. Start Docker, then run `docker compose build postgres`."
         )
 
     try:
@@ -202,6 +211,21 @@ def app_engine(pg_dsns: Dsns) -> AsyncEngine:
     from sqlalchemy.pool import NullPool
 
     return create_async_engine(pg_dsns.app_async, poolclass=NullPool)
+
+
+@pytest.fixture
+def app_sessionmaker(pg_dsns: Dsns) -> async_sessionmaker[AsyncSession]:
+    """Session factory over the unprivileged role, so RLS is in force.
+
+    What the adapters take in production, so tests exercise the same wiring —
+    including the ``app.user_id`` binding done by ``tenant_transaction``.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker as make_sessionmaker
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(pg_dsns.app_async, poolclass=NullPool)
+    return make_sessionmaker(engine, expire_on_commit=False)
 
 
 @pytest.fixture

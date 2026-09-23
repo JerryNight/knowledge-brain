@@ -21,17 +21,14 @@ holding the previous tenant's binding.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import pytest
 from sqlalchemy import exc, text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from kb.db import MissingTenantContext, tenant_transaction
 from kb.retrieval.query_builder import scoped_chunks
-
-from .conftest import Dsns
 
 CHUNKS_PER_TENANT = 3
 
@@ -99,16 +96,6 @@ async def two_tenants(admin_engine: AsyncEngine) -> tuple[Tenant, Tenant]:
     a = await _seed_tenant(admin_engine, email="a@example.com", marker="tenant-a")
     b = await _seed_tenant(admin_engine, email="b@example.com", marker="tenant-b")
     return a, b
-
-
-@pytest.fixture
-async def app_sessionmaker(pg_dsns: Dsns) -> AsyncIterator[async_sessionmaker]:
-    """Session factory over the unprivileged role, so RLS is in force."""
-    engine = create_async_engine(pg_dsns.app_async)
-    try:
-        yield async_sessionmaker(engine, expire_on_commit=False)
-    finally:
-        await engine.dispose()
 
 
 async def _visible_chunk_ids(conn, user_id: uuid.UUID | None) -> list[int]:
@@ -195,7 +182,10 @@ async def test_query_builder_renders_a_tenant_predicate() -> None:
     tenant_id = uuid.uuid4()
     compiled = str(scoped_chunks(tenant_id).compile(compile_kwargs={"literal_binds": True}))
     assert "user_id" in compiled
-    assert str(tenant_id) in compiled
+    # The Postgres dialect renders a UUID literal unhyphenated
+    # (`'ffaa377a241a...'`), so compare `hex` against it — matching `str(uuid)`
+    # would never succeed and would fail on a perfectly scoped statement.
+    assert tenant_id.hex in compiled
 
 
 # ---------------------------------------------------------------------------
